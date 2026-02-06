@@ -43,6 +43,18 @@ fn generate_builder(input: &DeriveInput) -> TokenStream {
         &f.ident
     });
     
+    let builder_pattern = fields.iter().map(|f| {
+        let name = &f.ident;
+        let ty = f.ty.clone();
+        quote! {
+            fn #name(&mut self, #name: #ty) -> &mut Self {
+                self.#name = Some(#name);
+                self
+            }
+        }
+    });
+
+
     let expanded =quote! {
         #builder_struct
         
@@ -54,6 +66,9 @@ fn generate_builder(input: &DeriveInput) -> TokenStream {
             }
         }
 
+        impl #builder_name {
+            #(#builder_pattern )*
+        }
     };
     proc_macro::TokenStream::from(expanded)
 }    
