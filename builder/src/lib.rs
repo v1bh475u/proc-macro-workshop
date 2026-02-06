@@ -54,8 +54,16 @@ fn generate_builder(input: &DeriveInput) -> TokenStream {
         }
     });
 
+    let build_fields = fields.iter().map(|f| {
+        let name = &f.ident;
+        let name_str = name.as_ref().unwrap().to_string();
+        quote! {
+            #name : self.#name.clone().ok_or_else(|| format!("field {} is required",#name_str ))?
+        }
+    });
 
     let expanded =quote! {
+        use std::error::Error;
         #builder_struct
         
         impl #name {
@@ -68,6 +76,11 @@ fn generate_builder(input: &DeriveInput) -> TokenStream {
 
         impl #builder_name {
             #(#builder_pattern )*
+            pub fn build(&mut self) -> Result<#name, Box<dyn Error>> {
+                Ok(#name {
+                    #(#build_fields,)*
+                })
+            }
         }
     };
     proc_macro::TokenStream::from(expanded)
