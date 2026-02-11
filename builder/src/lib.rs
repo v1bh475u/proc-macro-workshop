@@ -3,7 +3,6 @@ use syn::{parse_macro_input, DeriveInput, Error};
 
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
-    // eprintln!("INPUT: {:#?}", input);
     let input = parse_macro_input!(input as DeriveInput);
     builder::generate_builder(&input)
         .unwrap_or_else(Error::into_compile_error)
@@ -75,17 +74,17 @@ mod builder {
         let builder_fields = fields.iter().map(|f| {
             let name = f.name;
             match f.kind {
-                TypeKind::Option(ty) => quote! { #name: Option<#ty> },
-                TypeKind::Vec(ty) => quote! { #name: Vec<#ty>},
-                TypeKind::Other(ty) => quote! { #name: Option<#ty> },
+                TypeKind::Option(ty) => quote! { #name: ::std::option::Option<#ty> },
+                TypeKind::Vec(ty) => quote! { #name: ::std::vec::Vec<#ty>},
+                TypeKind::Other(ty) => quote! { #name: ::std::option::Option<#ty> },
             }
         });
 
         let builder_init = fields.iter().map(|f| {
             let name = f.name;
             match &f.kind {
-                TypeKind::Vec(_) => quote! { #name: Vec::new()},
-                _ => quote! {#name: None},
+                TypeKind::Vec(_) => quote! { #name: ::std::vec::Vec::new()},
+                _ => quote! {#name: ::core::option::Option::None},
             }
         });
 
@@ -114,10 +113,10 @@ mod builder {
                     }
                 }
             }
-            use std::error::Error;
+
             impl #builder_name {
-                pub fn build(&mut self) -> Result<#name, Box<dyn Error>> {
-                    Ok( #name{
+                pub fn build(&mut self) -> ::std::result::Result<#name, ::std::boxed::Box<dyn ::std::error::Error>> {
+                    ::std::result::Result::Ok( #name{
                             #(#field_set,)*
                         }
                     )
@@ -178,12 +177,12 @@ mod builder {
         match field.kind {
             TypeKind::Option(ty) => quote! {
                 fn #name(&mut self, #name: #ty) -> &mut Self {
-                    self.#name = Some(#name);
+                    self.#name = ::core::option::Option::Some(#name);
                     self
                 }
             },
             TypeKind::Vec(ty) => {
-                let mut element_builder = proc_macro2::TokenStream::new();
+                let mut element_builder = TokenStream::new();
                 if let Some(each_val) = &field.each {
                     if name != each_val {
                         element_builder = quote! {
@@ -197,7 +196,7 @@ mod builder {
                 quote! {
                     #element_builder
 
-                    fn #name(&mut self, #name: Vec<#ty>) -> &mut Self {
+                    fn #name(&mut self, #name: ::std::vec::Vec<#ty>) -> &mut Self {
                         self.#name = #name;
                         self
                     }
@@ -205,7 +204,7 @@ mod builder {
             }
             TypeKind::Other(ty) => quote! {
                 fn #name(&mut self, #name: #ty) -> &mut Self {
-                    self.#name = Some(#name);
+                    self.#name = ::core::option::Option::Some(#name);
                     self
                 }
             },
