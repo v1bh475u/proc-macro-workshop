@@ -1,17 +1,23 @@
 use proc_macro::TokenStream;
+use proc_macro2::Span;
 use quote::quote;
 use syn::{
-    parse_macro_input, Data, DeriveInput, Fields, GenericArgument, PathArguments, PathSegment,
-    Type, TypePath,
+    parse_macro_input, Attribute, Data, DeriveInput, Fields, GenericArgument, Ident, LitStr,
+    PathArguments, PathSegment, Result, Type, TypePath,
 };
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     // eprintln!("INPUT: {:#?}", input);
     let input = parse_macro_input!(input as DeriveInput);
     let tokens = generate_builder(&input);
     eprintln!("TOKENS:\n{}", tokens);
     tokens
+}
+struct BuilderField<'a> {
+    name: &'a Ident,
+    kind: TypeKind<'a>,
+    each: Option<Ident>,
 }
 
 fn generate_builder(input: &DeriveInput) -> TokenStream {
@@ -28,105 +34,152 @@ fn generate_builder(input: &DeriveInput) -> TokenStream {
         _ => unimplemented!("Builder can only be derived for structs with named fields"),
     };
 
+    let fields: Vec<BuilderField> = fields
+        .iter()
+        .map(|f| {
+            let name = f.ident.as_ref().unwrap();
+            let kind = classify_type(&f.ty);
+
+            let each = extract_builder_each(&f.attrs).ok().flatten();
+
+            BuilderField { name, kind, each }
+        })
+        .collect();
+
     let builder_fields = fields.iter().map(|f| {
-        let name = &f.ident;
-        let ty = &f.ty;
-
-        if is_option_type(ty) {
-            quote! {
-                #name : #ty
-            }
-        } else {
-            quote! {
-                #name: Option<#ty>
-            }
+        let name = f.name;
+        match f.kind {
+            TypeKind::Option(ty) => quote! { #name: Option<#ty> },
+            TypeKind::Vec(ty) => quote! { #name: Vec<#ty>},
+            TypeKind::Other(ty) => quote! { #name: Option<#ty> },
         }
     });
 
-    let builder_struct = quote! {
-        pub struct #builder_name {
-            #(#builder_fields,)*
-        }
-    };
-
-    let field_names = fields.iter().map(|f| &f.ident);
-
-    let builder_pattern = fields.iter().map(|f| {
-        let name = &f.ident;
-        let ty = &f.ty;
-
-        if let Some(inner_ty) = extract_option_inner_type(ty) {
-            quote! {
-                fn #name(&mut self, #name: #inner_ty) -> &mut Self {
-                    self.#name = Some(#name);
-                    self
-                }
-            }
-        } else {
-            quote! {
-                fn #name(&mut self, #name: #ty) -> &mut Self {
-                    self.#name = Some(#name);
-                    self
-                }
-            }
+    let builder_init = fields.iter().map(|f| {
+        let name = f.name;
+        match &f.kind {
+            TypeKind::Vec(_) => quote! { #name: Vec::new()},
+            _ => quote! {#name: None},
         }
     });
 
-    let build_fields = fields.iter().map(|f| {
-        let name = &f.ident;
-        let name_str = name.as_ref().unwrap().to_string();
+    let field_setters = fields.iter().map(|f| generate_builder_pattern(f));
 
-        if is_option_type(&f.ty)
-        {
-            quote! {
-                #name : self.#name.clone()
-            }
-        } else {
-            quote! {
-                #name : self.#name.clone().ok_or_else(|| format!("field {} is required",#name_str ))?
-            }
+    let field_set = fields.iter().map(|f| {
+        let name = f.name;
+        let name_str = name.to_string();
+        match &f.kind {
+            TypeKind::Other(_) => quote! {
+                #name: self.#name.clone().ok_or_else(||format!("field {} is required",#name_str))?
+            },
+            _ => quote! { #name : self.#name.clone() },
         }
     });
 
     let expanded = quote! {
-        use std::error::Error;
-        #builder_struct
+        pub struct #builder_name {
+            #(#builder_fields,)*
+        }
 
         impl #name {
             pub fn builder() -> #builder_name {
                 #builder_name {
-                    #(#field_names : None,)*
+                    #(#builder_init,)*
                 }
             }
         }
-
+        use std::error::Error;
         impl #builder_name {
-            #(#builder_pattern )*
             pub fn build(&mut self) -> Result<#name, Box<dyn Error>> {
-                Ok(#name {
-                    #(#build_fields,)*
-                })
+                Ok( #name{
+                        #(#field_set,)*
+                    }
+                )
             }
+            #(#field_setters)*
         }
     };
-    proc_macro::TokenStream::from(expanded)
+    TokenStream::from(expanded)
 }
 
-fn is_option_type(ty: &Type) -> bool {
-    extract_option_inner_type(ty).is_some()
+enum TypeKind<'a> {
+    Option(&'a Type),
+    Vec(&'a Type),
+    Other(&'a Type),
 }
 
-fn extract_option_inner_type(ty: &Type) -> Option<&Type> {
+fn classify_type(ty: &Type) -> TypeKind<'_> {
     if let Type::Path(TypePath { qself: None, path }) = ty {
         if let Some(PathSegment { ident, arguments }) = path.segments.last() {
-            if ident == "Option" {
-                if let PathArguments::AngleBracketed(args) = arguments {
-                    if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
-                        return Some(inner_ty);
+            if let PathArguments::AngleBracketed(args) = arguments {
+                if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                    match ident.to_string().as_str() {
+                        "Option" => return TypeKind::Option(inner_ty),
+                        "Vec" => return TypeKind::Vec(inner_ty),
+                        _ => return TypeKind::Other(ty),
                     }
                 }
             }
         }
     }
-    None
+    TypeKind::Other(ty)
+}
+
+fn extract_builder_each(attrs: &Vec<Attribute>) -> Result<Option<Ident>> {
+    for attr in attrs {
+        if attr.path().is_ident("builder") {
+            let mut each_val = None;
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("each") {
+                    let value = meta.value()?;
+                    let s: LitStr = value.parse()?;
+                    each_val = Some(Ident::new(&s.value(), Span::call_site()));
+                    Ok(())
+                } else {
+                    Err(meta.error("unsupported builder property"))
+                }
+            })?;
+            return Ok(each_val);
+        }
+    }
+    Ok(None)
+}
+
+fn generate_builder_pattern(field: &BuilderField) -> proc_macro2::TokenStream {
+    let name = field.name;
+    match field.kind {
+        TypeKind::Option(ty) => quote! {
+            fn #name(&mut self, #name: #ty) -> &mut Self {
+                self.#name = Some(#name);
+                self
+            }
+        },
+        TypeKind::Vec(ty) => {
+            let mut element_builder = proc_macro2::TokenStream::new();
+            if let Some(each_val) = &field.each {
+                if name != each_val {
+                    element_builder = quote! {
+                        fn #each_val(&mut self, #each_val: #ty) -> &mut Self {
+                            self.#name.push(#each_val);
+                            self
+                        }
+                    };
+                }
+            }
+            quote! {
+                #element_builder
+
+                fn #name(&mut self, #name: Vec<#ty>) -> &mut Self {
+                    self.#name = #name;
+                    self
+                }
+            }
+        }
+        TypeKind::Other(ty) => quote! {
+            fn #name(&mut self, #name: #ty) -> &mut Self {
+                self.#name = Some(#name);
+                self
+            }
+        },
+    }
 }
