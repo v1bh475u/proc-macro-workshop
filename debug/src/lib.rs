@@ -4,27 +4,29 @@ use syn::{parse_macro_input, DeriveInput, Error};
 #[proc_macro_derive(CustomDebug, attributes(debug))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    debug::expand_debug(&input)
+    debug::expand_debug(input)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
 
 mod debug {
-    use proc_macro2::{Span, TokenStream};
+    use proc_macro2::{TokenStream};
     use syn::spanned::Spanned;
     use quote::{quote, quote_spanned};
     use syn::{
-        Attribute, Data, DeriveInput, Fields, GenericArgument, Ident, LitStr, PathArguments,
-        PathSegment, Result, Type, TypePath, Index, Lit, ExprLit, Meta, Expr, 
+        Attribute, Data, DeriveInput, Fields,
+        Result, Index, Lit, ExprLit, Meta, Expr, GenericParam, Generics, parse_quote,
     };
-    pub(crate) fn expand_debug(input: &DeriveInput) -> Result<TokenStream> {
+    pub(crate) fn expand_debug(input: DeriveInput) -> Result<TokenStream> {
         let name = &input.ident;
         let name_str = &name.to_string();
+        let generics = add_trait_bounds(input.generics);
+        let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
         let fields = handle_data(&input.data)?;
         let expanded = quote! {
-            use std::fmt;
-            impl fmt::Debug for #name {
-                fn fmt(&self,f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            impl #impl_generics ::std::fmt::Debug for #name #ty_generics #where_clause {
+                fn fmt(&self,f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                     f.debug_struct(#name_str)
                     #fields
                     .finish()
@@ -33,6 +35,15 @@ mod debug {
         };
         eprintln!("{}",expanded);
         Ok(expanded)
+    }
+
+    fn add_trait_bounds(mut generics: Generics) -> Generics {
+        for param in &mut generics.params {
+            if let GenericParam::Type(ref mut type_param) = *param {
+                type_param.bounds.push(parse_quote!(std::fmt::Debug));
+            }
+        }
+        generics
     }
 
     fn handle_data(data: &Data) -> Result<TokenStream> {
